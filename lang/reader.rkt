@@ -1,7 +1,7 @@
 #lang racket
 
-(require "lexer.rkt")
-(require "parser.rkt")
+(require "../src/lexer.rkt")
+(require "../src/parser.rkt")
 (require syntax/strip-context)
 
 (provide (rename-out [naked-read read]
