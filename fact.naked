@@ -1,0 +1,11 @@
+#lang reader "naked.rkt"
+
+provide fact
+
+define: factorial n accum
+  if: = n 0
+    accum
+    factorial: sub1 n, * accum n
+
+define: fact n
+  factorial n 1

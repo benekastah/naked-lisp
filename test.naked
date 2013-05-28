@@ -1,0 +1,5 @@
+#lang reader "naked.rkt"
+
+require "fact.naked"
+
+fact 5

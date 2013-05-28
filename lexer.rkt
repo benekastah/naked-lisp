@@ -5,27 +5,21 @@
 (require racket/class)
 (require "tokens.rkt")
 
-(provide naked-racket-lex
-         naked-racket-lex-string
-         naked-racket-lex-file
-         naked-racket-do-lex
-         make-lexer)
+(provide make-lexer)
 
 (define-lex-abbrevs
   (list-open #\()
   (list-close #\))
   (line-break (:+ (:or "\r\n" #\newline #\page)))
   (indent-dedent (:seq line-break (:* whitespace)))
-  (segment-break #\,)
-  (indent #\:)
+  (sibling-expr #\,)
+  (child-expr #\:)
   (unqt #\~)
   (unqt-spl "~@")
   (datum (:+ (:~ list-open
                  list-close
-                 segment-break
-                 indent
-                 unqt
-                 unqt-spl
+                 sibling-expr
+                 child-expr
                  whitespace))))
 
 (define context%
@@ -33,6 +27,7 @@
     (super-new)
 
     (define indent-stack (list 0))
+    (field [backtokens '()])
 
     (define/public (indent-push! item)
       (set! indent-stack (cons item indent-stack)))
@@ -43,44 +38,48 @@
        result))
 
     (define/public (indent-inspect)
-      (first indent-stack))))
+      (first indent-stack))
 
-(define (naked-racket-do-lex lex in tokens)
-  (if (eof-object? (peek-char in))
-    (reverse (flatten tokens))
-    (let ([result (lex in)])
-     (if (void? result)
-       (naked-racket-do-lex lex in tokens)
-       (naked-racket-do-lex lex in (cons result tokens))))))
+    (define/public (backtokens-pop!)
+      (let ([result (first backtokens)])
+       (set! backtokens (rest backtokens))
+       result))
 
-(define (naked-racket-lex in)
-  (naked-racket-do-lex
-    (make-lexer) in '()))
-
-(define (naked-racket-lex-string str)
-  (naked-racket-lex (open-input-string str)))
-
-(define (naked-racket-lex-file f)
-  (naked-racket-lex (open-input-file f)))
-
+    (define/public (set-backtokens-pop! toks)
+      (let ([result (first toks)])
+       (set! backtokens (rest toks))
+       result))))
 
 (define (make-lexer)
   (letrec ([context (new context%)]
-           [lex (lexer
-                  [indent-dedent (do-indent-dedent context lexeme)]
-                  [segment-break (token-SEGMENT-BREAK)]
-                  [indent (token-INDENT)]
+           [ignore-token (lambda (input-port)
+                           (let ([pos-tok (lex input-port)])
+                             (position-token-token pos-tok)))]
+           [lex (lexer-src-pos
+                  [indent-dedent (do-indent-dedent context lexeme
+                                                   input-port start-pos)]
+                  [sibling-expr (token-SIBLING)]
+                  [child-expr (token-CHILD)]
                   [list-open (token-LIST-OPEN)]
                   [list-close (token-LIST-CLOSE)]
                   [unqt (token-UNQUOTE)]
                   [unqt-spl (token-UNQUOTE-SPLICING)]
                   [datum (token-DATUM (read (open-input-string lexeme)))]
-                  ;; Ignore whitespace
-                  [whitespace (lex input-port)]
-                  [(eof) (list 'eof (do-indent-dedent context ""))])])
-    lex))
+                  [whitespace (ignore-token input-port)]
+                  [(eof) (finish-lex context input-port start-pos)])])
+    (lambda (in . args)
+      (let ([result (apply lex in args)])
+       ; (displayln (token-name (position-token-token result)))
+       result))))
 
-(define (do-indent-dedent context indent)
+
+(define (finish-lex context input-port start-pos)
+  (if (= 0 (send context indent-inspect))
+    (token-EOF)
+    (do-indent-dedent context "" input-port start-pos)))
+
+
+(define (do-indent-dedent context indent input-port start-pos)
   ;; From http://docs.python.org/3/reference/lexical_analysis.html#indentation
   ;; Before the first line of the file is read, a single zero is pushed
   ;; on the stack; this will never be popped off again. The numbers
@@ -98,31 +97,40 @@
         [stack-top (send context indent-inspect)])
     (cond
       [(equal? indent-len stack-top)
-       (token-SEGMENT-BREAK-GREEDY)]
+       (token-STATEMENT-BREAK)]
 
       [(> indent-len stack-top)
        (begin
          (send context indent-push! indent-len)
-         (token-INDENT-GREEDY))]
+         (token-INDENT))]
 
       [(< indent-len stack-top)
-       (let loop ([tkns (list (do-dedent context))]
-                  [stack-top (send context indent-inspect)])
-         (cond
-           [(equal? indent-len stack-top)
-            tkns]
+       (begin
+         (let ([tok (do-dedent context)])
+           ;; Check to make sure we have not dropped below the next dedent
+           ;; level.
+           (let ([stack-top (send context indent-inspect)])
+             (cond
+               [(> indent-len stack-top)
+                (raise (string-append "When dedenting the level must "
+                                      "match an existing stack level."))]
 
-           [(< indent-len stack-top)
-            (loop (cons (do-dedent context) tkns)
-                  (send context indent-inspect))]
+               [(= indent-len stack-top)
+                tok]
 
-           [(> indent-len stack-top)
-            (raise (string-append "When dedenting the level must "
-                                  "match an existing stack level."))]))])))
+               ['else
+                (begin
+                  ;; Put the file's position back to where it was before
+                  ;; reading this item so we will gather as many dedents as
+                  ;; we need.
+                  (file-position input-port (position-offset start-pos))
+                  tok)]))))])))
+
 
 (define (do-dedent context)
   (send context indent-pop!)
-  (token-DEDENT-GREEDY))
+  (token-DEDENT))
+
 
 (define (indent-length indent)
   ;; It is expected that indent is properly formed, meaning that it
