@@ -2,4 +2,12 @@
 
 require "fact.naked"
 
-fact 5
+define fact5: fact 5 ;; Do this thing
+`(~fact5)
+
+define-syntax def
+  syntax-rules ()
+    (_ a b) (define a b)
+
+def a 5
+a

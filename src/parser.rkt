@@ -16,7 +16,7 @@
                (format "invalid token: ~a" tok-name)]
 
               [(not tok-value)
-               (format "token not found: ~a" tok-name)]
+               (format "unexpected token ~a" tok-name)]
 
               ['else
                (format "~a => ~a" tok-name tok-value)])
@@ -42,18 +42,11 @@
             racket
             quoting
             file)
-    (precs (right INDENT CHILD SIBLING STATEMENT-BREAK))
+    (precs (right INDENT COLON COMMA STATEMENT-BREAK))
     (grammar
       (program
         [(statement-list) $1]
         [(statement-breaks program) $2])
-
-      (quoted
-        [(UNQUOTE expr)
-         (list 'unquote $2)]
-
-        [(UNQUOTE-SPLICING expr)
-         (list 'unquote-splicing $2)])
 
       (ls-contents
         [(expr)
@@ -68,6 +61,12 @@
 
         [(LIST-OPEN ls-contents LIST-CLOSE)
          $2])
+
+      (quoted
+        [(QUOTE expr) (list 'quote $2)]
+        [(QUASIQUOTE expr) (list 'quasiquote $2)]
+        [(UNQUOTE expr) (list 'unquote $2)]
+        [(UNQUOTE-SPLICING expr) (list 'unquote-splicing $2)])
 
       (expr
         [(DATUM) $1]
@@ -90,13 +89,13 @@
       (sibling-list
         [(unterminated-statement) (list $1)]
 
-        [(sibling-list SIBLING unterminated-statement)
+        [(sibling-list COMMA unterminated-statement)
          `(,@$1 ,$3)])
 
       (unterminated-statement
         [(segment) $1]
 
-        [(list-segment CHILD sibling-list)
+        [(list-segment COLON sibling-list)
          `(,@$1 ,@$3)])
 
       (statement

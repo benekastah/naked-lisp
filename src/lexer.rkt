@@ -12,22 +12,47 @@
   (list-close #\))
   (line-break (:+ (:or "\r\n" #\newline #\page)))
   (indent-dedent (:seq line-break (:* whitespace)))
-  (sibling-expr #\,)
-  (child-expr #\:)
+  (comma #\,)
+  (colon #\:)
+  (qt #\')
+  (quasiqt #\`)
   (unqt #\~)
-  (unqt-spl "~@")
-  (datum (:+ (:~ list-open
-                 list-close
-                 sibling-expr
-                 child-expr
-                 whitespace))))
+  (unqt-splicing "~@")
+  (str (:seq #\" (:* (:or (:~ #\") "\\\"")) #\"))
+  (line-comment-begin (:or #\; "#!"))
+  (line-comment (:seq line-comment-begin (:* (:~ #\newline))))
+  (block-comment-begin "#|")
+  (block-comment-end "|#")
+  (block-comment (:seq block-comment-begin any-string block-comment-end))
+  (datum-comment-begin "#;")
+  (comment-begin (:or
+                   line-comment-begin
+                   block-comment-begin
+                   datum-comment-begin))
+  (datum-start (:&
+                 (:~ list-open qt quasiqt unqt comma #\" #\#)
+                 (complement unqt-splicing)
+                 (complement comment-begin)
+                 datum-middle))
+  (datum-middle (:~ whitespace))
+  (datum-end (:&
+               (:~ list-close comma colon #\")
+               datum-middle))
+  (datum (:or
+           (:seq datum-start (:* datum-middle) datum-end)
+           (:& datum-start datum-end)
+           str)))
+
+(define (file-position-to in pos)
+  (file-position in (position-offset pos)))
 
 (define context%
   (class object%
     (super-new)
 
     (define indent-stack (list 0))
-    (field [backtokens '()])
+    (field [block-comment-level 0])
+    (field [datum-comment-list-nest-level 0])
 
     (define/public (indent-push! item)
       (set! indent-stack (cons item indent-stack)))
@@ -40,35 +65,129 @@
     (define/public (indent-inspect)
       (first indent-stack))
 
-    (define/public (backtokens-pop!)
-      (let ([result (first backtokens)])
-       (set! backtokens (rest backtokens))
-       result))
+    (define/public (datum-comment-list-nest-level++!)
+      (set!
+        datum-comment-list-nest-level
+        (add1 datum-comment-list-nest-level)))
 
-    (define/public (set-backtokens-pop! toks)
-      (let ([result (first toks)])
-       (set! backtokens (rest toks))
-       result))))
+    (define/public (datum-comment-list-nest-level--!)
+      (set!
+        datum-comment-list-nest-level
+        (sub1 datum-comment-list-nest-level)))
+
+    (define/public (block-comment-level++!)
+      (set!
+        block-comment-level
+        (add1 block-comment-level)))
+
+    (define/public (block-comment-level--!)
+      (set!
+        block-comment-level
+        (sub1 block-comment-level)))))
+
+(define (make-block-comment-lexer context main-lex)
+  (letrec ([level-add1!
+            (lambda (input-port)
+              (send context block-comment-level++!)
+              (lex input-port))]
+
+           [level-sub1!
+            (lambda (input-port)
+              (send context block-comment-level--!)
+              (maybe-end-comment input-port))]
+
+           [maybe-end-comment
+            (lambda (input-port)
+              (if (= 0 (get-field block-comment-level context))
+                (main-lex input-port)
+                (lex input-port)))]
+
+           [lex
+            (lexer-src-pos
+              [block-comment-begin (return-without-pos
+                                     (level-add1! input-port))]
+              [block-comment-end (return-without-pos
+                                   (level-sub1! input-port))]
+              [any-char (return-without-pos (lex input-port))])])
+    lex))
+
+(define (make-line-comment-lexer context main-lex)
+  (letrec ([end-comment
+            (lambda (input-port lexeme)
+              ;; Let the main lexer use this token as well.
+              (file-position input-port
+                             (- (file-position input-port)
+                                (or (string-length lexeme) 1)))
+              (main-lex input-port))]
+
+           [lex
+            (lexer-src-pos
+              [#\newline (return-without-pos
+                           (end-comment input-port lexeme))]
+              [(eof) (return-without-pos (end-comment input-port lexeme))]
+              [any-char (return-without-pos (lex input-port))])])
+    lex))
+
+(define (make-datum-comment-lexer context main-lex)
+  (letrec ([list-add1!
+            (lambda (input-port)
+              (send context datum-comment-list-nest-level++!)
+              (lex input-port))]
+
+           [list-sub1!
+            (lambda (input-port)
+              (send context datum-comment-list-nest-level--!)
+              (maybe-end-comment input-port))]
+
+           [maybe-end-comment
+            (lambda (input-port)
+              (if (= 0 (get-field
+                         datum-comment-list-nest-level
+                         context))
+                (main-lex input-port)
+                (lex input-port)))]
+
+           [lex
+            (lexer-src-pos
+              [datum (return-without-pos (maybe-end-comment input-port))]
+              [(:or qt quasiqt unqt unqt-splicing whitespace)
+               (return-without-pos (lex input-port))]
+              [list-open (return-without-pos (list-add1! input-port))]
+              [list-close (return-without-pos (list-sub1! input-port))])])
+    lex))
 
 (define (make-lexer)
   (letrec ([context (new context%)]
-           [ignore-token (lambda (input-port)
-                           (let ([pos-tok (lex input-port)])
-                             (position-token-token pos-tok)))]
+
            [lex (lexer-src-pos
                   [indent-dedent (do-indent-dedent context lexeme
                                                    input-port start-pos)]
-                  [sibling-expr (token-SIBLING)]
-                  [child-expr (token-CHILD)]
+                  [comma (token-COMMA)]
+                  [colon (token-COLON)]
                   [list-open (token-LIST-OPEN)]
                   [list-close (token-LIST-CLOSE)]
+                  [qt (token-QUOTE)]
+                  [quasiqt (token-QUASIQUOTE)]
                   [unqt (token-UNQUOTE)]
-                  [unqt-spl (token-UNQUOTE-SPLICING)]
+                  [unqt-splicing (token-UNQUOTE-SPLICING)]
+                  [line-comment-begin (return-without-pos
+                                        (line-comment-lex input-port))]
+                  [block-comment-begin (begin
+                                         (send context block-comment-level++!)
+                                         (return-without-pos
+                                           (block-comment-lex input-port)))]
+                  [datum-comment-begin (return-without-pos
+                                         (datum-comment-lex input-port))]
                   [datum (token-DATUM (read (open-input-string lexeme)))]
-                  [whitespace (ignore-token input-port)]
-                  [(eof) (finish-lex context input-port start-pos)])])
-    (lambda (in . args)
-      (let ([result (apply lex in args)])
+                  [whitespace (return-without-pos (lex input-port))]
+                  [(eof) (finish-lex context input-port start-pos)])]
+
+           [line-comment-lex (make-line-comment-lexer context lex)]
+           [block-comment-lex (make-block-comment-lexer context lex)]
+           [datum-comment-lex (make-datum-comment-lexer context lex)])
+
+    (lambda (in)
+      (let ([result (lex in)])
        ; (displayln (token-name (position-token-token result)))
        result))))
 
@@ -123,7 +242,7 @@
                   ;; Put the file's position back to where it was before
                   ;; reading this item so we will gather as many dedents as
                   ;; we need.
-                  (file-position input-port (position-offset start-pos))
+                  (file-position-to input-port start-pos)
                   tok)]))))])))
 
 
